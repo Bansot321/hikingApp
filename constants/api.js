@@ -1,0 +1,1 @@
+export const API_URL = "https://hiking-app-six.vercel.app";
