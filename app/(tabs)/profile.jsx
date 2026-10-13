@@ -1,6 +1,6 @@
-
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   ScrollView,
   StyleSheet,
@@ -10,8 +10,11 @@ import {
 } from 'react-native';
 
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
 import { useTrails } from '../../hooks/useTrails';
+import { getMyProfile, logoutUser } from '../../services/api';
 
 const stats = [
   { value: '18', label: 'Hikes' },
@@ -48,9 +51,39 @@ const recentHikes = [
 ];
 
 export default function Profile() {
-  const { trails = [], error } = useTrails();
+  const router = useRouter();
+  const { trails = [], error: trailsError } = useTrails();
 
-  // UI placeholder only; authentication is not connected yet.
+  const [user, setUser] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileError, setProfileError] = useState('');
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  // Load the currently authenticated user from the backend.
+  const loadProfile = useCallback(async () => {
+    setProfileLoading(true);
+    setProfileError('');
+
+    try {
+      const profile = await getMyProfile();
+      setUser(profile);
+    } catch (err) {
+      setUser(null);
+      setProfileError(
+        err.message || 'Unable to load your profile.'
+      );
+    } finally {
+      setProfileLoading(false);
+    }
+  }, []);
+
+  // Refresh the profile whenever the Profile tab is opened.
+  useFocusEffect(
+    useCallback(() => {
+      loadProfile();
+    }, [loadProfile])
+  );
+
   const handleChangePassword = () => {
     Alert.alert(
       'Change Password',
@@ -58,11 +91,45 @@ export default function Profile() {
     );
   };
 
+  const handleEditProfile = () => {
+    Alert.alert(
+      'Edit Profile',
+      'Profile editing will be available in a future update.'
+    );
+  };
+
   const handleLogout = () => {
+    if (loggingOut) return;
+
     Alert.alert(
       'Log Out',
-      'Logout functionality has not been connected yet.',
-      [{ text: 'OK' }]
+      'Are you sure you want to log out?',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Log Out',
+          style: 'destructive',
+          onPress: async () => {
+            setLoggingOut(true);
+
+            try {
+              await logoutUser();
+              setUser(null);
+              router.replace('/login');
+            } catch (err) {
+              Alert.alert(
+                'Logout Error',
+                err.message || 'Unable to log out.'
+              );
+            } finally {
+              setLoggingOut(false);
+            }
+          },
+        },
+      ]
     );
   };
 
@@ -78,17 +145,55 @@ export default function Profile() {
         {/* Profile Card */}
         <View style={styles.profileCard}>
           <View style={styles.avatar}>
-            <Text style={styles.avatarText}>B</Text>
+            {profileLoading ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={styles.avatarText}>
+                {(user?.username || 'H')
+                  .charAt(0)
+                  .toUpperCase()}
+              </Text>
+            )}
           </View>
 
           <View style={styles.profileInfo}>
-            <Text style={styles.name}>Bansot</Text>
-            <Text style={styles.username}>@trailwanderer</Text>
+            <Text style={styles.name} numberOfLines={1}>
+              {profileLoading
+                ? 'Loading profile...'
+                : user?.username || 'Hiker'}
+            </Text>
+
+            <Text style={styles.username} numberOfLines={1}>
+              {user?.username
+                ? `@${user.username}`
+                : profileError
+                  ? 'Profile unavailable'
+                  : 'Your hiking account'}
+            </Text>
+
+            {user?.email ? (
+              <Text
+                style={styles.profileEmail}
+                numberOfLines={1}
+              >
+                {user.email}
+              </Text>
+            ) : null}
 
             <View style={styles.memberRow}>
-              <View style={styles.memberDot} />
+              <View
+                style={[
+                  styles.memberDot,
+                  profileError && styles.memberDotError,
+                ]}
+              />
+
               <Text style={styles.memberText}>
-                Trail Explorer
+                {profileLoading
+                  ? 'Connecting...'
+                  : profileError
+                    ? 'Not connected'
+                    : 'Trail Explorer'}
               </Text>
             </View>
           </View>
@@ -96,18 +201,44 @@ export default function Profile() {
           <TouchableOpacity
             style={styles.editButton}
             activeOpacity={0.8}
-            onPress={() =>
-              Alert.alert(
-                'Edit Profile',
-                'Profile editing will be available in a future update.'
-              )
-            }
+            onPress={handleEditProfile}
           >
             <Text style={styles.editText}>Edit</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Stats */}
+        {/* Profile Connection Error */}
+        {profileError ? (
+          <View style={styles.profileErrorCard}>
+            <MaterialCommunityIcons
+              name="alert-circle-outline"
+              size={20}
+              color="#B6473B"
+            />
+
+            <View style={styles.profileErrorInfo}>
+              <Text style={styles.profileErrorTitle}>
+                Unable to load profile
+              </Text>
+
+              <Text style={styles.profileErrorMessage}>
+                {profileError}
+              </Text>
+
+              <TouchableOpacity
+                onPress={loadProfile}
+                disabled={profileLoading}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.retryText}>
+                  Try again
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : null}
+
+        {/* Stats - Existing sample data */}
         <View style={styles.statsCard}>
           {stats.map((stat, index) => (
             <React.Fragment key={stat.label}>
@@ -115,6 +246,7 @@ export default function Profile() {
                 <Text style={styles.statValue}>
                   {stat.value}
                 </Text>
+
                 <Text style={styles.statLabel}>
                   {stat.label}
                 </Text>
@@ -134,6 +266,7 @@ export default function Profile() {
               <Text style={styles.sectionLabel}>
                 HIKING LEVEL
               </Text>
+
               <Text style={styles.levelTitle}>
                 Mountain Explorer
               </Text>
@@ -154,6 +287,7 @@ export default function Profile() {
             <Text style={styles.progressText}>
               8,420 / 10,000 m elevation
             </Text>
+
             <Text style={styles.progressText}>84%</Text>
           </View>
         </View>
@@ -164,6 +298,7 @@ export default function Profile() {
             <Text style={styles.sectionTitle}>
               Achievements
             </Text>
+
             <Text style={styles.sectionSubtitle}>
               Your trail milestones
             </Text>
@@ -186,9 +321,11 @@ export default function Profile() {
             <View style={styles.achievementIcon}>
               <Text>🏔️</Text>
             </View>
+
             <Text style={styles.achievementTitle}>
               Peak Hunter
             </Text>
+
             <Text style={styles.achievementText}>
               5 peaks
             </Text>
@@ -198,9 +335,11 @@ export default function Profile() {
             <View style={styles.achievementIcon}>
               <Text>🥾</Text>
             </View>
+
             <Text style={styles.achievementTitle}>
               Trail Walker
             </Text>
+
             <Text style={styles.achievementText}>
               100 km
             </Text>
@@ -210,9 +349,11 @@ export default function Profile() {
             <View style={styles.achievementIcon}>
               <Text>⛰️</Text>
             </View>
+
             <Text style={styles.achievementTitle}>
               High Ground
             </Text>
+
             <Text style={styles.achievementText}>
               2,500 m
             </Text>
@@ -225,8 +366,9 @@ export default function Profile() {
             <Text style={styles.sectionTitle}>
               Recent Hikes
             </Text>
+
             <Text style={styles.sectionSubtitle}>
-              {error
+              {trailsError
                 ? 'Trail details unavailable'
                 : 'Your latest trail activity'}
             </Text>
@@ -263,7 +405,10 @@ export default function Profile() {
 
                 <View style={styles.hikeInfo}>
                   <View style={styles.hikeTop}>
-                    <Text style={styles.hikeName}>
+                    <Text
+                      style={styles.hikeName}
+                      numberOfLines={1}
+                    >
                       {trail?.name ?? hike.name}
                     </Text>
 
@@ -273,8 +418,8 @@ export default function Profile() {
                         hike.difficulty === 'Difficult'
                           ? styles.difficult
                           : hike.difficulty === 'Easy'
-                          ? styles.easy
-                          : styles.moderate,
+                            ? styles.easy
+                            : styles.moderate,
                       ]}
                     >
                       {hike.difficulty}
@@ -289,11 +434,15 @@ export default function Profile() {
                     <Text style={styles.hikeStat}>
                       {hike.distance}
                     </Text>
+
                     <Text style={styles.separator}>•</Text>
+
                     <Text style={styles.hikeStat}>
                       {hike.elevation}
                     </Text>
+
                     <Text style={styles.separator}>•</Text>
+
                     <Text style={styles.hikeStat}>
                       {hike.time}
                     </Text>
@@ -312,6 +461,7 @@ export default function Profile() {
             <Text style={styles.sectionTitle}>
               Account Settings
             </Text>
+
             <Text style={styles.sectionSubtitle}>
               Manage your account and security
             </Text>
@@ -336,6 +486,7 @@ export default function Profile() {
               <Text style={styles.settingTitle}>
                 Change Password
               </Text>
+
               <Text style={styles.settingSubtitle}>
                 Update your account password
               </Text>
@@ -354,29 +505,37 @@ export default function Profile() {
             style={styles.settingRow}
             activeOpacity={0.7}
             onPress={handleLogout}
+            disabled={loggingOut}
           >
             <View style={styles.logoutIcon}>
-              <MaterialCommunityIcons
-                name="logout"
-                size={21}
-                color="#B6473B"
-              />
+              {loggingOut ? (
+                <ActivityIndicator color="#B6473B" />
+              ) : (
+                <MaterialCommunityIcons
+                  name="logout"
+                  size={21}
+                  color="#B6473B"
+                />
+              )}
             </View>
 
             <View style={styles.settingInfo}>
               <Text style={styles.logoutTitle}>
-                Log Out
+                {loggingOut ? 'Logging Out...' : 'Log Out'}
               </Text>
+
               <Text style={styles.settingSubtitle}>
                 Sign out of your account
               </Text>
             </View>
 
-            <MaterialCommunityIcons
-              name="chevron-right"
-              size={22}
-              color="#9AA59D"
-            />
+            {!loggingOut && (
+              <MaterialCommunityIcons
+                name="chevron-right"
+                size={22}
+                color="#9AA59D"
+              />
+            )}
           </TouchableOpacity>
         </View>
 
@@ -436,6 +595,11 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#89938C',
   },
+  profileEmail: {
+    marginTop: 3,
+    fontSize: 9,
+    color: '#68756D',
+  },
   memberRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -447,6 +611,9 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: '#2F9E62',
     marginRight: 5,
+  },
+  memberDotError: {
+    backgroundColor: '#B6473B',
   },
   memberText: {
     fontSize: 9,
@@ -463,6 +630,35 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     color: '#245C43',
+  },
+  profileErrorCard: {
+    backgroundColor: '#FBEAE7',
+    borderRadius: 12,
+    padding: 13,
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  profileErrorInfo: {
+    flex: 1,
+    marginLeft: 9,
+  },
+  profileErrorTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#A33C32',
+  },
+  profileErrorMessage: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#80443D',
+    marginTop: 4,
+  },
+  retryText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#A33C32',
+    marginTop: 8,
   },
   statsCard: {
     backgroundColor: '#FFFFFF',
@@ -678,14 +874,11 @@ const styles = StyleSheet.create({
     marginHorizontal: 5,
     color: '#B2BAB5',
   },
-
   chevron: {
     fontSize: 24,
     color: '#A3ADA6',
     marginLeft: 6,
   },
-
-  // Account settings
   settingsCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 15,

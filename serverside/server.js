@@ -7,7 +7,7 @@ require("dotenv").config({
 const express = require("express");
 const cors = require("cors");
 const userRoutes = require("./route/routess");
-
+const trailRoutes = require("./route/trailRoutes");
 const app = express();
 
 app.use(cors());
@@ -24,8 +24,8 @@ app.get("/api/health", (req, res) => {
     status: "ok",
   });
 });
-
 app.use("/api/users", userRoutes);
+app.use("/api/trails", trailRoutes);
 
 module.exports = app;
 

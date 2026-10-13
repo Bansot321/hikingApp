@@ -1,7 +1,6 @@
-
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useRouter } from "expo-router";
 import { useState } from "react";
-
 import {
   ActivityIndicator,
   Alert,
@@ -23,10 +22,7 @@ export default function LoginScreen() {
 
   const handleLogin = async () => {
     if (!email.trim() || !password) {
-      Alert.alert(
-        "Error",
-        "Please enter your email and password."
-      );
+      Alert.alert("Error", "Please enter your email and password.");
       return;
     }
 
@@ -35,19 +31,17 @@ export default function LoginScreen() {
     try {
       setLoading(true);
 
-      const response = await fetch(
-        `${API_URL}/api/users/login`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            email: email.trim(),
-            password,
-          }),
-        }
-      );
+      const response = await fetch(`${API_URL}/api/users/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+        }),
+      });
 
       const data = await response.json();
 
@@ -59,7 +53,16 @@ export default function LoginScreen() {
         return;
       }
 
-      // No JWT or persistent login session in this version.
+      if (!data.token) {
+        Alert.alert(
+          "Login Error",
+          "The server did not return a session token."
+        );
+        return;
+      }
+
+      await AsyncStorage.setItem("authToken", data.token);
+
       Alert.alert("Success", data.message || "Login successful.", [
         {
           text: "Continue",
@@ -71,7 +74,7 @@ export default function LoginScreen() {
 
       Alert.alert(
         "Connection Error",
-        "Cannot connect to the server. Check your API address, Wi-Fi, and backend server."
+        "Cannot connect to the server. Check your API URL and internet connection."
       );
     } finally {
       setLoading(false);
@@ -87,7 +90,6 @@ export default function LoginScreen() {
       <View style={styles.content}>
         <View style={styles.header}>
           <Text style={styles.title}>Sign In</Text>
-
           <Text style={styles.subtitle}>
             Enter your email and password to continue.
           </Text>
@@ -127,10 +129,7 @@ export default function LoginScreen() {
           />
 
           <TouchableOpacity
-            style={[
-              styles.button,
-              loading && styles.buttonDisabled,
-            ]}
+            style={[styles.button, loading && styles.buttonDisabled]}
             onPress={handleLogin}
             disabled={loading}
             activeOpacity={0.8}
