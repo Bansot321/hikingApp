@@ -1,4 +1,5 @@
 
+//tursoConfig.js
 const path = require("path");
 const dotenv = require("dotenv");
 const { createClient } = require("@libsql/client");
