@@ -87,17 +87,43 @@ async function getTrailReviews(req, res) {
   }
 }
 
-// POST /api/trails/:trailId/reviews
+ // POST /api/trails/:trailId/reviews
 async function createTrailReview(req, res) {
-  try {
-    const trailId = req.params.trailId;
-    const { rating, comment } = req.body || {};
-    const userId = req.user.id;
+  const trailId = req.params.trailId;
+  const userId = req.user?.id;
+  const body = req.body || {};
 
+  let clientReviewId = null;
+
+  try {
+    const { rating, comment } = body;
+
+    // Validate trail and authenticated user.
     if (!trailId || !trailId.trim()) {
       return res.status(400).json({
         message: "A valid trail ID is required.",
       });
+    }
+
+    if (userId == null) {
+      return res.status(401).json({
+        message: "Authentication is required.",
+      });
+    }
+
+    // Validate the stable ID used for safe retries.
+    if (body.clientReviewId !== undefined) {
+      if (
+        typeof body.clientReviewId !== "string" ||
+        !body.clientReviewId.trim() ||
+        body.clientReviewId.trim().length > 100
+      ) {
+        return res.status(400).json({
+          message: "A valid client review ID is required.",
+        });
+      }
+
+      clientReviewId = body.clientReviewId.trim();
     }
 
     if (
@@ -124,6 +150,7 @@ async function createTrailReview(req, res) {
       });
     }
 
+    // Confirm the trail exists and is active.
     const trailResult = await db.execute({
       sql: `SELECT id
             FROM trails
@@ -138,6 +165,64 @@ async function createTrailReview(req, res) {
       });
     }
 
+    // Return a consistent response for an existing review.
+    async function getReviewByClientId(clientId) {
+      return db.execute({
+        sql: `SELECT
+                r.id,
+                r.user_id,
+                r.trail_id,
+                r.rating,
+                r.comment,
+                r.created_at,
+                r.updated_at,
+                u.username
+              FROM trail_reviews r
+              JOIN users u ON u.id = r.user_id
+              WHERE r.client_review_id = ?
+              LIMIT 1`,
+        args: [clientId],
+      });
+    }
+
+    function sendExistingReview(review) {
+      return res.status(200).json({
+        message: "Review was already submitted.",
+        review: {
+          id: Number(review.id),
+          userId: Number(review.user_id),
+          trailId: review.trail_id,
+          username: review.username,
+          rating: Number(review.rating),
+          comment: review.comment,
+          createdAt: review.created_at,
+          updatedAt: review.updated_at,
+        },
+      });
+    }
+
+    // IDEMPOTENCY: a retry with the same ID must not insert again.
+    if (clientReviewId) {
+      const previous = await getReviewByClientId(clientReviewId);
+
+      if (previous.rows.length > 0) {
+        const review = previous.rows[0];
+
+        // Never expose another user's review through a reused ID.
+        if (
+          String(review.user_id) !== String(userId) ||
+          String(review.trail_id) !== String(trailId)
+        ) {
+          return res.status(409).json({
+            message: "This review ID has already been used.",
+          });
+        }
+
+        return sendExistingReview(review);
+      }
+    }
+
+    // Preserve the existing rule: one review per user per trail.
     const existing = await db.execute({
       sql: `SELECT id
             FROM trail_reviews
@@ -148,15 +233,23 @@ async function createTrailReview(req, res) {
 
     if (existing.rows.length > 0) {
       return res.status(409).json({
-        message: "You have already reviewed this trail. Edit your existing review instead.",
+        message:
+          "You have already reviewed this trail. Edit your existing review instead.",
       });
     }
 
+    // Insert the stable client ID when supplied.
     const result = await db.execute({
       sql: `INSERT INTO trail_reviews
-              (user_id, trail_id, rating, comment)
-            VALUES (?, ?, ?, ?)`,
-      args: [userId, trailId, rating, cleanComment],
+              (user_id, trail_id, rating, comment, client_review_id)
+            VALUES (?, ?, ?, ?, ?)`,
+      args: [
+        userId,
+        trailId,
+        rating,
+        cleanComment,
+        clientReviewId,
+      ],
     });
 
     const reviewResult = await db.execute({
@@ -177,6 +270,12 @@ async function createTrailReview(req, res) {
 
     const review = reviewResult.rows[0];
 
+    if (!review) {
+      return res.status(500).json({
+        message: "Review was saved but could not be retrieved.",
+      });
+    }
+
     return res.status(201).json({
       message: "Review submitted successfully.",
       review: {
@@ -191,11 +290,62 @@ async function createTrailReview(req, res) {
       },
     });
   } catch (error) {
+    // A concurrent retry may hit the unique index after the first
+    // request inserts the review. Recover by looking up the same ID.
     if (
+      clientReviewId &&
       String(error.message || "").includes("UNIQUE constraint failed")
     ) {
+      try {
+        const previous = await db.execute({
+          sql: `SELECT
+                  r.id,
+                  r.user_id,
+                  r.trail_id,
+                  r.rating,
+                  r.comment,
+                  r.created_at,
+                  r.updated_at,
+                  u.username
+                FROM trail_reviews r
+                JOIN users u ON u.id = r.user_id
+                WHERE r.client_review_id = ?
+                LIMIT 1`,
+          args: [clientReviewId],
+        });
+
+        if (previous.rows.length > 0) {
+          const review = previous.rows[0];
+
+          if (
+            String(review.user_id) === String(userId) &&
+            String(review.trail_id) === String(trailId)
+          ) {
+            return res.status(200).json({
+              message: "Review was already submitted.",
+              review: {
+                id: Number(review.id),
+                userId: Number(review.user_id),
+                trailId: review.trail_id,
+                username: review.username,
+                rating: Number(review.rating),
+                comment: review.comment,
+                createdAt: review.created_at,
+                updatedAt: review.updated_at,
+              },
+            });
+          }
+        }
+      } catch (lookupError) {
+        console.error(
+          "Could not recover retried review:",
+          lookupError.message
+        );
+      }
+
       return res.status(409).json({
-        message: "You have already reviewed this trail.",
+        message:
+          "A review already exists or this review ID has already been used.",
       });
     }
 
@@ -206,6 +356,7 @@ async function createTrailReview(req, res) {
     });
   }
 }
+
 
 // PUT /api/trails/:trailId/reviews/:reviewId
 async function updateTrailReview(req, res) {
