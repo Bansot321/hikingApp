@@ -28,7 +28,7 @@ function normalizeTrack(row) {
         ? null
         : String(row.client_track_id),
 
-    // Also expose the raw database field for compatibility
+    // Raw database field for compatibility
     client_track_id:
       row.client_track_id == null
         ? null
@@ -89,6 +89,9 @@ async function uploadTrack(req, res) {
       });
     }
 
+    const normalizedClientTrackId = clientTrackId.trim();
+    const userId = String(req.user.id);
+
     if (!validPoints(points)) {
       return res.status(400).json({
         message: "At least two valid GPS points are required.",
@@ -112,7 +115,6 @@ async function uploadTrack(req, res) {
       }
     }
 
-    const normalizedClientTrackId = clientTrackId.trim();
     const pointsJson = JSON.stringify(points);
 
     if (Buffer.byteLength(pointsJson, "utf8") > 2 * 1024 * 1024) {
@@ -121,23 +123,43 @@ async function uploadTrack(req, res) {
       });
     }
 
+    // Never recreate a hike that this user has already deleted.
+    const deletedTrack = await db.execute({
+      sql: `
+        SELECT client_track_id
+        FROM deleted_hike_tracks
+        WHERE user_id = ?
+          AND client_track_id = ?
+        LIMIT 1
+      `,
+      args: [userId, normalizedClientTrackId],
+    });
+
+    if (deletedTrack.rows.length > 0) {
+      return res.status(409).json({
+        deleted: true,
+        clientTrackId: normalizedClientTrackId,
+        message: "This hike was deleted and cannot be uploaded again.",
+      });
+    }
+
     // Reuse the database ID when this local hike was uploaded before.
     const existing = await db.execute({
       sql: `
         SELECT id
         FROM hike_tracks
-        WHERE user_id = ? AND client_track_id = ?
+        WHERE user_id = ?
+          AND client_track_id = ?
         LIMIT 1
       `,
-      args: [req.user.id, normalizedClientTrackId],
+      args: [userId, normalizedClientTrackId],
     });
 
     const trackId = existing.rows.length
       ? String(existing.rows[0].id)
       : crypto.randomUUID();
 
-    // The unique constraint on (user_id, client_track_id)
-    // prevents duplicate cloud records for the same local hike.
+    // The unique index on (user_id, client_track_id) prevents duplicates.
     await db.execute({
       sql: `
         INSERT INTO hike_tracks (
@@ -167,7 +189,7 @@ async function uploadTrack(req, res) {
       `,
       args: [
         trackId,
-        req.user.id,
+        userId,
         normalizedClientTrackId,
         trailId == null ? null : String(trailId),
         trailName.trim(),
@@ -186,7 +208,7 @@ async function uploadTrack(req, res) {
       clientTrackId: normalizedClientTrackId,
     });
   } catch (error) {
-    console.error("Upload hike error:", error.message);
+    console.error("Upload hike error:", error);
 
     return res.status(500).json({
       message: "Unable to upload this hike. Please try again.",
@@ -203,7 +225,7 @@ async function getMyTracks(req, res) {
         WHERE user_id = ?
         ORDER BY created_at DESC
       `,
-      args: [req.user.id],
+      args: [String(req.user.id)],
     });
 
     return res.status(200).json({
@@ -211,7 +233,7 @@ async function getMyTracks(req, res) {
       tracks: result.rows.map(normalizeTrack),
     });
   } catch (error) {
-    console.error("Get hikes error:", error.message);
+    console.error("Get hikes error:", error);
 
     return res.status(500).json({
       message: "Unable to load your saved hikes.",
@@ -225,10 +247,11 @@ async function getMyTrackById(req, res) {
       sql: `
         SELECT *
         FROM hike_tracks
-        WHERE id = ? AND user_id = ?
+        WHERE id = ?
+          AND user_id = ?
         LIMIT 1
       `,
-      args: [req.params.id, req.user.id],
+      args: [req.params.id, String(req.user.id)],
     });
 
     if (!result.rows.length) {
@@ -241,10 +264,61 @@ async function getMyTrackById(req, res) {
       track: normalizeTrack(result.rows[0]),
     });
   } catch (error) {
-    console.error("Get hike details error:", error.message);
+    console.error("Get hike details error:", error);
 
     return res.status(500).json({
       message: "Unable to load this hike.",
+    });
+  }
+}
+
+async function deleteMyTrack(req, res) {
+  try {
+    const userId = String(req.user.id);
+    const clientTrackId = String(
+      req.params.clientTrackId ?? ""
+    ).trim();
+
+    if (!clientTrackId) {
+      return res.status(400).json({
+        message: "A valid hike ID is required.",
+      });
+    }
+
+    // Record the tombstone first, even if no cloud row currently exists.
+    await db.execute({
+      sql: `
+        INSERT INTO deleted_hike_tracks (
+          user_id,
+          client_track_id
+        )
+        VALUES (?, ?)
+        ON CONFLICT(user_id, client_track_id) DO NOTHING
+      `,
+      args: [userId, clientTrackId],
+    });
+
+    // Delete only the matching recording belonging to this user.
+    await db.execute({
+      sql: `
+        DELETE FROM hike_tracks
+        WHERE user_id = ?
+          AND client_track_id = ?
+      `,
+      args: [userId, clientTrackId],
+    });
+
+    return res.status(200).json({
+      success: true,
+      deleted: true,
+      clientTrackId,
+      message: "Hike deletion recorded successfully.",
+    });
+  } catch (error) {
+    console.error("Delete hike error:", error);
+
+    return res.status(500).json({
+      message: "Unable to delete this hike from the server.",
     });
   }
 }
@@ -253,4 +327,5 @@ module.exports = {
   uploadTrack,
   getMyTracks,
   getMyTrackById,
+  deleteMyTrack,
 };
