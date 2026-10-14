@@ -1,4 +1,4 @@
-//userController.js
+
 const crypto = require("crypto");
 const db = require("../config/tursoConfig");
 
@@ -8,6 +8,14 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
+function isUniqueConstraintError(error) {
+  return (
+    String(error.code || "").includes("CONSTRAINT") ||
+    String(error.message || "").includes("UNIQUE constraint failed")
+  );
+}
+
+// SIGNUP
 async function signup(req, res) {
   try {
     const { username, email, password, confirmPassword } = req.body || {};
@@ -18,14 +26,18 @@ async function signup(req, res) {
       typeof password !== "string" ||
       typeof confirmPassword !== "string"
     ) {
-      return res.status(400).json({ message: "Please fill in all fields." });
+      return res.status(400).json({
+        message: "Please fill in all fields.",
+      });
     }
 
     const cleanUsername = username.trim();
     const cleanEmail = email.trim().toLowerCase();
 
     if (!cleanUsername || !cleanEmail || !password || !confirmPassword) {
-      return res.status(400).json({ message: "Please fill in all fields." });
+      return res.status(400).json({
+        message: "Please fill in all fields.",
+      });
     }
 
     if (cleanUsername.length < 6 || cleanUsername.length > 16) {
@@ -47,7 +59,9 @@ async function signup(req, res) {
     }
 
     if (password !== confirmPassword) {
-      return res.status(400).json({ message: "Passwords do not match." });
+      return res.status(400).json({
+        message: "Passwords do not match.",
+      });
     }
 
     const existing = await db.execute({
@@ -79,22 +93,21 @@ async function signup(req, res) {
       },
     });
   } catch (error) {
-    if (
-      String(error.code || "").includes("CONSTRAINT") ||
-      String(error.message || "").includes("UNIQUE constraint failed")
-    ) {
+    if (isUniqueConstraintError(error)) {
       return res.status(409).json({
         message: "Email or username is already registered.",
       });
     }
 
     console.error("Signup error:", error.message);
+
     return res.status(500).json({
       message: "Unable to create account. Please try again.",
     });
   }
 }
 
+// LOGIN
 async function login(req, res) {
   try {
     const { email, password } = req.body || {};
@@ -120,7 +133,7 @@ async function login(req, res) {
 
     const user = result.rows[0];
 
-    // This comparison matches your existing no-bcrypt setup.
+    // Preserves compatibility with the current no-bcrypt setup.
     if (!user || user.password !== password) {
       return res.status(401).json({
         message: "Incorrect email or password.",
@@ -151,12 +164,14 @@ async function login(req, res) {
     });
   } catch (error) {
     console.error("Login error:", error.message);
+
     return res.status(500).json({
       message: "Unable to log in. Please try again.",
     });
   }
 }
 
+// AUTHENTICATION MIDDLEWARE
 async function authenticate(req, res, next) {
   try {
     const authorization = req.headers.authorization || "";
@@ -212,19 +227,176 @@ async function authenticate(req, res, next) {
     req.sessionId = Number(session.session_id);
     req.tokenHash = tokenHash;
 
-    next();
+    return next();
   } catch (error) {
     console.error("Authentication error:", error.message);
+
     return res.status(500).json({
       message: "Unable to verify your session.",
     });
   }
 }
 
+// GET CURRENT USER
 function getMe(req, res) {
-  return res.status(200).json({ user: req.user });
+  return res.status(200).json({
+    user: req.user,
+  });
 }
 
+// UPDATE CURRENT USER'S PROFILE
+async function updateMe(req, res) {
+  try {
+    const { username, email } = req.body || {};
+
+    if (typeof username !== "string" || typeof email !== "string") {
+      return res.status(400).json({
+        message: "Please enter a username and email.",
+      });
+    }
+
+    const cleanUsername = username.trim();
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (!cleanUsername || !cleanEmail) {
+      return res.status(400).json({
+        message: "Username and email are required.",
+      });
+    }
+
+    if (cleanUsername.length < 6 || cleanUsername.length > 16) {
+      return res.status(400).json({
+        message: "Username must be 6–16 characters long.",
+      });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({
+        message: "Please enter a valid email address.",
+      });
+    }
+
+    // Check whether another account already uses this username or email.
+    const existing = await db.execute({
+      sql: `SELECT id FROM users
+            WHERE (username = ? COLLATE NOCASE
+                OR email = ? COLLATE NOCASE)
+              AND id != ?
+            LIMIT 1`,
+      args: [cleanUsername, cleanEmail, req.user.id],
+    });
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({
+        message: "That username or email is already in use.",
+      });
+    }
+
+    await db.execute({
+      sql: `UPDATE users
+            SET username = ?, email = ?
+            WHERE id = ?`,
+      args: [cleanUsername, cleanEmail, req.user.id],
+    });
+
+    return res.status(200).json({
+      message: "Profile updated successfully.",
+      user: {
+        id: req.user.id,
+        username: cleanUsername,
+        email: cleanEmail,
+      },
+    });
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return res.status(409).json({
+        message: "That username or email is already in use.",
+      });
+    }
+
+    console.error("Update profile error:", error.message);
+
+    return res.status(500).json({
+      message: "Unable to update your profile. Please try again.",
+    });
+  }
+}
+
+// CHANGE CURRENT USER'S PASSWORD
+async function changePassword(req, res) {
+  try {
+    const { currentPassword, newPassword, confirmPassword } =
+      req.body || {};
+
+    if (
+      typeof currentPassword !== "string" ||
+      typeof newPassword !== "string" ||
+      typeof confirmPassword !== "string" ||
+      !currentPassword ||
+      !newPassword ||
+      !confirmPassword
+    ) {
+      return res.status(400).json({
+        message: "Please fill in all password fields.",
+      });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        message: "Your new password must be at least 8 characters.",
+      });
+    }
+
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({
+        message: "The new passwords do not match.",
+      });
+    }
+
+    if (currentPassword === newPassword) {
+      return res.status(400).json({
+        message: "Your new password must be different from your current password.",
+      });
+    }
+
+    // Only retrieve the password belonging to the authenticated user.
+    const result = await db.execute({
+      sql: "SELECT password FROM users WHERE id = ? LIMIT 1",
+      args: [req.user.id],
+    });
+
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User account not found.",
+      });
+    }
+
+    if (user.password !== currentPassword) {
+      return res.status(400).json({
+        message: "Your current password is incorrect.",
+      });
+    }
+
+    await db.execute({
+      sql: "UPDATE users SET password = ? WHERE id = ?",
+      args: [newPassword, req.user.id],
+    });
+
+    return res.status(200).json({
+      message: "Password changed successfully.",
+    });
+  } catch (error) {
+    console.error("Change password error:", error.message);
+
+    return res.status(500).json({
+      message: "Unable to change your password. Please try again.",
+    });
+  }
+}
+
+// LOGOUT
 async function logout(req, res) {
   try {
     await db.execute({
@@ -232,9 +404,12 @@ async function logout(req, res) {
       args: [req.sessionId],
     });
 
-    return res.status(200).json({ message: "Logged out successfully." });
+    return res.status(200).json({
+      message: "Logged out successfully.",
+    });
   } catch (error) {
     console.error("Logout error:", error.message);
+
     return res.status(500).json({
       message: "Unable to log out. Please try again.",
     });
@@ -246,5 +421,7 @@ module.exports = {
   login,
   authenticate,
   getMe,
+  updateMe,
+  changePassword,
   logout,
 };
