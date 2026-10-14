@@ -1,0 +1,237 @@
+const crypto = require("crypto");
+const db = require("../config/tursoConfig");
+
+function parsePoints(value) {
+  if (Array.isArray(value)) return value;
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function normalizeTrack(row) {
+  return {
+    id: String(row.id),
+    trailId: row.trail_id == null ? null : String(row.trail_id),
+    trailName: row.trail_name,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    durationS: Number(row.duration_s) || 0,
+    distanceM: Number(row.distance_m) || 0,
+    ascentM: Number(row.ascent_m) || 0,
+    points: parsePoints(row.points_json),
+    createdAt: row.created_at,
+  };
+}
+
+function validPoints(points) {
+  return (
+    Array.isArray(points) &&
+    points.length >= 2 &&
+    points.every((point) => {
+      const latitude = Number(point?.latitude);
+      const longitude = Number(point?.longitude);
+
+      return (
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180
+      );
+    })
+  );
+}
+
+async function uploadTrack(req, res) {
+  try {
+    const {
+      id: clientTrackId,
+      trailId,
+      trailName,
+      startedAt,
+      endedAt,
+      durationS,
+      distanceM,
+      ascentM,
+      points,
+    } = req.body || {};
+
+    if (
+      typeof clientTrackId !== "string" ||
+      !clientTrackId.trim() ||
+      typeof trailName !== "string" ||
+      !trailName.trim()
+    ) {
+      return res.status(400).json({
+        message: "Track ID and trail name are required.",
+      });
+    }
+
+    if (!validPoints(points)) {
+      return res.status(400).json({
+        message: "At least two valid GPS points are required.",
+      });
+    }
+
+    const numericFields = [
+      ["durationS", durationS],
+      ["distanceM", distanceM],
+      ["ascentM", ascentM],
+    ];
+
+    for (const [field, value] of numericFields) {
+      if (
+        value != null &&
+        (!Number.isFinite(Number(value)) || Number(value) < 0)
+      ) {
+        return res.status(400).json({
+          message: `Invalid ${field} value.`,
+        });
+      }
+    }
+
+    // Prevent excessively large requests from sending huge GPS recordings.
+    const pointsJson = JSON.stringify(points);
+
+    if (Buffer.byteLength(pointsJson, "utf8") > 2 * 1024 * 1024) {
+      return res.status(413).json({
+        message: "This GPS recording is too large to upload at once.",
+      });
+    }
+
+    const existing = await db.execute({
+      sql: `
+        SELECT id
+        FROM hike_tracks
+        WHERE user_id = ? AND client_track_id = ?
+        LIMIT 1
+      `,
+      args: [req.user.id, clientTrackId.trim()],
+    });
+
+    const trackId = existing.rows.length
+      ? String(existing.rows[0].id)
+      : crypto.randomUUID();
+
+    await db.execute({
+      sql: `
+        INSERT INTO hike_tracks (
+          id,
+          user_id,
+          client_track_id,
+          trail_id,
+          trail_name,
+          started_at,
+          ended_at,
+          duration_s,
+          distance_m,
+          ascent_m,
+          points_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, client_track_id)
+        DO UPDATE SET
+          trail_id = excluded.trail_id,
+          trail_name = excluded.trail_name,
+          started_at = excluded.started_at,
+          ended_at = excluded.ended_at,
+          duration_s = excluded.duration_s,
+          distance_m = excluded.distance_m,
+          ascent_m = excluded.ascent_m,
+          points_json = excluded.points_json
+      `,
+      args: [
+        trackId,
+        req.user.id,
+        clientTrackId.trim(),
+        trailId == null ? null : String(trailId),
+        trailName.trim(),
+        startedAt || null,
+        endedAt || null,
+        Number(durationS) || 0,
+        Number(distanceM) || 0,
+        Number(ascentM) || 0,
+        pointsJson,
+      ],
+    });
+
+    return res.status(200).json({
+      message: "Hike uploaded successfully.",
+      trackId,
+    });
+  } catch (error) {
+    console.error("Upload hike error:", error.message);
+
+    return res.status(500).json({
+      message: "Unable to upload this hike. Please try again.",
+    });
+  }
+}
+
+async function getMyTracks(req, res) {
+  try {
+    const result = await db.execute({
+      sql: `
+        SELECT *
+        FROM hike_tracks
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+      `,
+      args: [req.user.id],
+    });
+
+    return res.status(200).json({
+      count: result.rows.length,
+      tracks: result.rows.map(normalizeTrack),
+    });
+  } catch (error) {
+    console.error("Get hikes error:", error.message);
+
+    return res.status(500).json({
+      message: "Unable to load your saved hikes.",
+    });
+  }
+}
+
+async function getMyTrackById(req, res) {
+  try {
+    const result = await db.execute({
+      sql: `
+        SELECT *
+        FROM hike_tracks
+        WHERE id = ? AND user_id = ?
+        LIMIT 1
+      `,
+      args: [req.params.id, req.user.id],
+    });
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        message: "Saved hike not found.",
+      });
+    }
+
+    return res.status(200).json({
+      track: normalizeTrack(result.rows[0]),
+    });
+  } catch (error) {
+    console.error("Get hike details error:", error.message);
+
+    return res.status(500).json({
+      message: "Unable to load this hike.",
+    });
+  }
+}
+
+module.exports = {
+  uploadTrack,
+  getMyTracks,
+  getMyTrackById,
+};

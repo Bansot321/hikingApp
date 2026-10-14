@@ -9,6 +9,7 @@ const cors = require("cors");
 const userRoutes = require("./route/routess");
 const trailRoutes = require("./route/trailRoutes");
 const app = express();
+const trackRoutes = require("./route/trackRoutes");
 
 app.use(cors());
 app.use(express.json());
@@ -26,6 +27,7 @@ app.get("/api/health", (req, res) => {
 });
 app.use("/api/users", userRoutes);
 app.use("/api/trails", trailRoutes);
+app.use("/api/tracks", trackRoutes);
 
 module.exports = app;
 

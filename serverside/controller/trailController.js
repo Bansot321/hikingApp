@@ -1,4 +1,4 @@
-
+//trailController.js
 const db = require("../config/tursoConfig");
 
 async function getTrails(req, res) {
